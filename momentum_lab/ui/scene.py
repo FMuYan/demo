@@ -125,6 +125,9 @@ class Scene:
         clock = pygame.time.Clock()
         fonts = _load_fonts()
 
+        # compute panel layout once up-front so buttons/inputs are interactive immediately
+        self._compute_panel_layout(fonts)
+
         while True:
             dt = clock.tick(self.fps) / 1000.0
 
