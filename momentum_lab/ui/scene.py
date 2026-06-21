@@ -1,18 +1,23 @@
 """
-ui/scene.py  —  pygame 可视化场景（优化面板布局与样式）
-改动要点：
-- 每次绘制时动态计算输入框布局以支持不同字体/尺寸
-- 在右侧面板增加阴影与标题栏，E（恢复系数）放在标题栏右侧
-- 统一面板内间距、分割线与字体层级，数值右对齐，单位在数值右侧靠外显示
-- 修复 Esc 取消编辑时恢复缓冲的顺序问题
-- 小的视觉优化：更明显的分割线、按钮提示区对齐、更一致的颜色
+ui/scene.py  —  pygame 可视化场景（优化面板、导出与按钮）
+
+本次改动：
+- 保持原有字体（Maple Mono NF CN）
+- 修复单位显示超出面板的问题（单位会被限制在面板内）
+- 把提示文字移到更显眼的位置并改为主色以提高可见性
+- 添加面板按钮：开始/暂停（与 SPACE 同步）和导出（CSV+图表，调用 export_chart）
+- 添加导出后的短暂消息显示
+- 暂停时遮罩仅覆盖仿真区域（不覆盖右侧面板）
+- 布局继续使用动态计算（每帧/每次绘制）
 """
 
 from __future__ import annotations
 
 import pygame
 import sys
+from pathlib import Path
 from momentum_lab.model.block import Block, D
+from momentum_lab.export import export_chart
 
 # ── 调色板 ──────────────────────────────────────────────────
 MAIN = "#F6F6F8"
@@ -37,7 +42,7 @@ PANEL_W = 320
 SIM_W = W - PANEL_W
 FLOOR_Y = H - 160
 HINT_H = 44
-Y_FONTS = None  # use system default
+Y_FONTS = "Maple Mono NF CN"  # 保持原字体
 SIM_PAD = 60
 TRACK_W = SIM_W - SIM_PAD * 2
 PIXELS_PER_M = TRACK_W / 8.0
@@ -56,24 +61,24 @@ def _block_h(blk: Block) -> int:
     return max(40, min(110, int(blk.m * 22 + 28)))
 
 
-# ── 字体加载（更合理的层级）
+# ── 字体加载（保持原有层级）
 def _load_fonts():
     def F(size, is_bold=False):
         return pygame.font.SysFont(Y_FONTS, size, bold=is_bold)
 
     return {
-        "title": F(18, is_bold=True),
-        "h2": F(15, is_bold=True),
-        "body": F(14),
+        "title": F(20, is_bold=True),
+        "h2": F(16, is_bold=True),
+        "body": F(15),
         "small": F(13),
-        "hint": F(12),
-        "mono": F(13),
+        "hint": F(13),
+        "mono": F(14),
     }
 
 
 class Scene:
     """
-    主场景 — 优化后的右侧实验面板
+    主场景 — 带可编辑参数面板、导出按钮与开始/暂停按钮
     """
 
     E_PRESETS = [1.0, 0.5, 0.0]
@@ -113,7 +118,12 @@ class Scene:
         }
         self.active_input: str | None = None
         self.input_rects: dict[str, pygame.Rect] = {}
+        self.button_rects: dict[str, pygame.Rect] = {}
         self._paused_before_edit = False
+
+        # transient message (e.g., export result)
+        self._message: str | None = None
+        self._message_timer: int = 0
 
     def run(self):
         pygame.init()
@@ -131,26 +141,38 @@ class Scene:
                     sys.exit()
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     mx, my = event.pos
-                    for field, rect in self.input_rects.items():
+                    # check buttons first
+                    for name, rect in self.button_rects.items():
                         if rect.collidepoint(mx, my):
-                            self.active_input = field
-                            # 清空缓冲以便快速输入
-                            self.input_buffers[field] = ""
-                            self._paused_before_edit = self.paused
-                            self.paused = True
+                            if name == "play_pause":
+                                self.paused = not self.paused
+                            elif name == "export":
+                                self._do_export()
                             break
                     else:
-                        if self.active_input is not None:
-                            # cancel edit when clicking outside
-                            self.active_input = None
-                            self.paused = self._paused_before_edit
+                        # then inputs
+                        for field, rect in self.input_rects.items():
+                            if rect.collidepoint(mx, my):
+                                self.active_input = field
+                                # 清空缓冲以便快速输入
+                                self.input_buffers[field] = ""
+                                self._paused_before_edit = self.paused
+                                self.paused = True
+                                break
+                        else:
+                            if self.active_input is not None:
+                                # cancel edit when clicking outside
+                                # restore buffer value for that field
+                                old = self.active_input
+                                self.input_buffers[old] = self._current_value_str(old)
+                                self.active_input = None
+                                self.paused = self._paused_before_edit
 
                 if event.type == pygame.KEYDOWN:
                     if self.active_input is not None:
                         if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                             self._commit_active_input()
                         elif event.key == pygame.K_ESCAPE:
-                            # restore buffer for that field, then clear active
                             old = self.active_input
                             if old:
                                 self.input_buffers[old] = self._current_value_str(old)
@@ -180,6 +202,12 @@ class Scene:
                 self._update(dt)
                 if self._flash > 0:
                     self._flash -= 1
+
+            # update message timer
+            if self._message_timer > 0:
+                self._message_timer -= 1
+                if self._message_timer == 0:
+                    self._message = None
 
             self._draw(screen, fonts)
             pygame.display.flip()
@@ -256,6 +284,19 @@ class Scene:
         new_e = self.E_PRESETS[self._e_idx]
         self.collision = D(self.block_a, self.block_b, e=new_e)
 
+    def _do_export(self):
+        try:
+            outdir = Path("outputs")
+            outdir.mkdir(parents=True, exist_ok=True)
+            paths = export_chart(self.block_a, self.block_b, e=self.collision.e, output_dir=outdir, duration=6.0)
+            self._message = f"导出成功: {', '.join([p.name for p in paths])}"
+            self._message_timer = 240  # 显示 4 秒（60 fps 约 4s）
+            print("Exported:", paths)
+        except Exception as exc:
+            self._message = f"导出失败: {exc}"
+            self._message_timer = 240
+            print("Export error:", exc)
+
     def _draw(self, screen: pygame.Surface, fonts: dict):
         screen.fill(BG)
         pygame.draw.rect(screen, TRACK_BG, (0, 0, SIM_W, H))
@@ -264,6 +305,10 @@ class Scene:
         self._draw_panel(screen, fonts)
         self._draw_hintbar(screen, fonts)
         if self.paused:
+            # 暂停遮罩仅覆盖仿真区
+            overlay = pygame.Surface((SIM_W, H), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 80))
+            screen.blit(overlay, (0, 0))
             self._draw_paused_overlay(screen, fonts)
 
     def _draw_track(self, screen, fonts):
@@ -305,6 +350,7 @@ class Scene:
 
     def _draw_panel(self, screen, fonts):
         px = SIM_W
+        pad = 16
         # panel shadow
         shadow = pygame.Surface((PANEL_W, H), pygame.SRCALPHA)
         shadow.fill((0, 0, 0, 18))
@@ -317,23 +363,36 @@ class Scene:
         self._compute_panel_layout(fonts)
 
         cy = 18
-        pad = 16
 
-        # title bar with E on right
-        title_h = 36
+        # title bar
+        title_h = 40
         title_rect = pygame.Rect(px + pad, cy, PANEL_W - pad * 2, title_h)
-        pygame.draw.rect(screen, (230, 235, 240), title_rect, border_radius=6)
+        pygame.draw.rect(screen, (230, 235, 240), title_rect, border_radius=8)
         title_s = fonts["title"].render("动量守恒实验", True, TEXT_HEAD)
         screen.blit(title_s, (title_rect.x + 10, title_rect.y + (title_h - title_s.get_height()) // 2))
-        # E small box on right
+
+        # draw buttons (play/pause and export) to the left of title
+        btn_play = self.button_rects.get("play_pause")
+        btn_export = self.button_rects.get("export")
+        if btn_play:
+            pygame.draw.rect(screen, BUTTON_COL, btn_play, border_radius=6)
+            pygame.draw.rect(screen, DIVIDER, btn_play, width=1, border_radius=6)
+            lbl = "暂停" if not self.paused else "开始"
+            lbl_s = fonts["small"].render(lbl, True, TEXT_PRI)
+            screen.blit(lbl_s, (btn_play.x + (btn_play.w - lbl_s.get_width()) // 2, btn_play.y + (btn_play.h - lbl_s.get_height()) // 2))
+        if btn_export:
+            pygame.draw.rect(screen, BUTTON_COL, btn_export, border_radius=6)
+            pygame.draw.rect(screen, DIVIDER, btn_export, width=1, border_radius=6)
+            lbl_s = fonts["small"].render("导出", True, TEXT_PRI)
+            screen.blit(lbl_s, (btn_export.x + (btn_export.w - lbl_s.get_width()) // 2, btn_export.y + (btn_export.h - lbl_s.get_height()) // 2))
+
+        # e small box on right of title
         e_box = self.input_rects.get("e")
         if e_box:
-            # draw small label and box
             e_label = fonts["small"].render("e", True, TEXT_SEC)
-            screen.blit(e_label, (e_box.x - 22, title_rect.y + (title_h - e_label.get_height()) // 2))
+            screen.blit(e_label, (e_box.x - 18, title_rect.y + (title_h - e_label.get_height()) // 2))
             pygame.draw.rect(screen, BUTTON_COL, e_box, border_radius=6)
             pygame.draw.rect(screen, DIVIDER, e_box, width=1, border_radius=6)
-            # render value (buffer if active)
             ev = self.input_buffers.get("e", self._current_value_str("e")) if self.active_input != "e" else self.input_buffers.get("e", "")
             ev_s = fonts["small"].render(ev, True, TEXT_PRI)
             screen.blit(ev_s, (e_box.x + 8, e_box.y + (e_box.h - ev_s.get_height()) // 2))
@@ -341,32 +400,26 @@ class Scene:
         cy += title_h + 12
 
         # sections: A and B
-        # A
         cy = _panel_heading(screen, fonts, px + pad, cy, "物块 A", COL_A)
         cy += 6
         cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "质量", "ma", val_col=COL_A)
         cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "速度", "va", val_col=COL_A)
-        # separator
         pygame.draw.line(screen, DIVIDER, (px + pad, cy + 6), (px + PANEL_W - pad, cy + 6))
         cy += 14
 
-        # B
         cy = _panel_heading(screen, fonts, px + pad, cy, "物块 B", COL_B)
         cy += 6
         cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "质量", "mb", val_col=COL_B)
         cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "速度", "vb", val_col=COL_B)
-        cy += 6
+        cy += 10
 
-        # momentum / energy
         cy = _panel_heading(screen, fonts, px + pad, cy, "初始 / 当前", TEXT_HEAD)
         cy += 8
-        # initial
         init_p = self.initial_p
         init_ek = self.initial_ek
         cy = _kv_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "初始 总动量 p", f"{init_p:.4f} kg·m/s")
         cy = _kv_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "初始 总动能 Ek", f"{init_ek:.4f} J")
         cy += 6
-        # current
         self.collision.block_1 = self.block_a
         self.collision.block_2 = self.block_b
         p_now = self.collision.total_momentum
@@ -374,22 +427,33 @@ class Scene:
         cy = _kv_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "当前 总动量 p", f"{p_now:.4f} kg·m/s")
         cy = _kv_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "当前 总动能 Ek", f"{ek_now:.4f} J")
 
-        # hint
-        tip = fonts["hint"].render("回车确认，Esc 取消。点击数值区域开始编辑。", True, TEXT_SEC)
+        # message (e.g., export result)
+        if self._message:
+            msg_s = fonts["small"].render(self._message, True, TEXT_PRI)
+            screen.blit(msg_s, (px + pad, H - 90))
+
+        # hint (moved upward for visibility)
+        tip = fonts["hint"].render("回车确认，Esc 取消。点击数值区域开始编辑。", True, TEXT_PRI)
         screen.blit(tip, (px + pad, H - 56))
 
     def _compute_panel_layout(self, fonts):
         px = SIM_W
         pad = 16
         cy = 18
-        # title height
-        title_h = 36
+        title_h = 40
         cy += title_h + 12
         box_h = fonts["small"].get_height() + 8
         box_w = 86
         right_x = px + (PANEL_W - pad) - box_w
         # e box in title area
-        self.input_rects["e"] = pygame.Rect(right_x, 18 + (36 - box_h) // 2, box_w, box_h)
+        self.input_rects["e"] = pygame.Rect(right_x, 18 + (title_h - box_h) // 2, box_w, box_h)
+        # buttons on left of title
+        btn_w = 72
+        btn_h = 28
+        btn_x = px + pad
+        btn_y = 18 + (title_h - btn_h) // 2
+        self.button_rects["play_pause"] = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
+        self.button_rects["export"] = pygame.Rect(btn_x + btn_w + 10, btn_y, btn_w, btn_h)
         # blocks
         cy += fonts["h2"].get_height() + 6
         self.input_rects["ma"] = pygame.Rect(right_x, cy + 0, box_w, box_h)
@@ -418,14 +482,21 @@ class Scene:
             display_text = self.input_buffers.get(field_name, "")
         else:
             display_text = self._current_value_str(field_name)
-        # render right-aligned inside box
         txt_surf = fonts["small"].render(display_text, True, val_col or TEXT_PRI)
+        # right aligned inside box
         screen.blit(txt_surf, (rect.right - 8 - txt_surf.get_width(), box_y + (box_h - txt_surf.get_height()) // 2))
-        # unit to the right outside box
+        # unit to the right, but clamp within panel bounds
         unit = self._unit_for_field(field_name)
         if unit:
-            unit_s = fonts["small"].render(unit, True, TEXT_SEC)
-            screen.blit(unit_s, (rect.right + 8, box_y + (box_h - unit_s.get_height()) // 2))
+            unit_surf = fonts["small"].render(unit, True, TEXT_SEC)
+            px = SIM_W
+            panel_right = px + PANEL_W
+            desired_x = rect.right + 8
+            max_x = panel_right - 12 - unit_surf.get_width()
+            unit_x = desired_x if desired_x <= max_x else (rect.right - 8 - unit_surf.get_width())
+            # ensure unit_x at least rect.right + 4 if possible
+            unit_x = max(rect.right + 4, min(unit_x, max_x))
+            screen.blit(unit_surf, (unit_x, box_y + (box_h - unit_surf.get_height()) // 2))
         return y + box_h + 6
 
     def _current_value_str(self, field_name: str) -> str:
@@ -489,34 +560,8 @@ class Scene:
             cx += db.get_width() + 28
 
     def _draw_paused_overlay(self, screen, fonts):
-        overlay = pygame.Surface((SIM_W, H), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 60))
-        screen.blit(overlay, (0, 0))
         s = fonts["title"].render("已暂停", True, AMBER)
         screen.blit(s, (SIM_W // 2 - s.get_width() // 2, FLOOR_Y // 2 - s.get_height() // 2))
 
 
-def _draw_velocity_arrow(screen, blk, sx, sy, w, col):
-    if abs(blk.v) < 0.05:
-        return
-    cx = sx + w // 2
-    ay = sy - 14
-    sign = 1 if blk.v > 0 else -1
-    length = min(90, max(16, int(abs(blk.v) * 18)))
-    tip = cx + sign * length
-    pygame.draw.line(screen, col, (cx, ay), (tip, ay), 2)
-    pygame.draw.polygon(screen, col, [(tip, ay), (tip - sign * 10, ay - 5), (tip - sign * 10, ay + 5)])
-
-
-def _panel_heading(screen, fonts, x, y, text, color):
-    s = fonts["h2"].render(text, True, color)
-    screen.blit(s, (x, y))
-    return y + s.get_height() + 2
-
-
-def _kv_row(screen, fonts, x, y, w, key, val, val_col=None):
-    ks = fonts["small"].render(key, True, TEXT_SEC)
-    vs = fonts["small"].render(val, True, val_col or TEXT_PRI)
-    screen.blit(ks, (x, y))
-    screen.blit(vs, (x + w - vs.get_width(), y))
-    return y + ks.get_height() + 6
+# END
