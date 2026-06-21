@@ -1,6 +1,9 @@
 """
-ui/scene.py  —  pygame 可视化场景
+ui/scene.py  —  pygame 可视化场景（带交互输入面板）
 布局：左侧仿真轨道区 | 右侧信息面板（固定 320px）
+
+改动说明：右侧参数面板由只读展示改为可编辑输入框，支持鼠标点击选中、键盘输入数值、回车确认、Esc 取消。
+支持可编辑参数：物块 A 质量 (ma)、速度 (va)、物块 B 质量 (mb)、速度 (vb)、恢复系数 (e)
 """
 
 from __future__ import annotations
@@ -88,6 +91,8 @@ class Scene:
         R       重置
         E       切换碰撞类型
         Q/ESC   退出
+
+    交互输入：在右侧面板点击参数项进入编辑，输入数字后按回车确认，Esc 取消。
     """
 
     E_PRESETS = [1.0, 0.5, 0.0]
@@ -114,6 +119,19 @@ class Scene:
         # 碰撞闪光效果计时（帧数）
         self._flash = 0
 
+        # 输入面板状态
+        # 字段标识：ma, va, mb, vb, e
+        self.input_buffers: dict[str, str] = {
+            "ma": f"{self.block_a.m}",
+            "va": f"{self.block_a.v}",
+            "mb": f"{self.block_b.m}",
+            "vb": f"{self.block_b.v}",
+            "e": f"{self.collision.e}",
+        }
+        self.active_input: str | None = None
+        # 在运行时由 _compute_panel_layout 填充（字段 -> pygame.Rect）
+        self.input_rects: dict[str, pygame.Rect] = {}
+
     # ── 主循环 ───────────────────────────────────────────────
     def run(self):
         pygame.init()
@@ -123,6 +141,9 @@ class Scene:
         clock = pygame.time.Clock()
         fonts = _load_fonts()
 
+        # 预计算一次面板布局，用于点击命中检测
+        self._compute_panel_layout(fonts)
+
         while True:
             dt = clock.tick(self.fps) / 1000.0
 
@@ -130,7 +151,38 @@ class Scene:
                 if event.type == pygame.QUIT:
                     pygame.quit()
                     sys.exit()
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    mx, my = event.pos
+                    # 点击面板输入框，选中
+                    for field, rect in self.input_rects.items():
+                        if rect.collidepoint(mx, my):
+                            self.active_input = field
+                            # buffer 初始化为当前字符串表示
+                            self.input_buffers[field] = self._current_value_str(field)
+                            break
+                    else:
+                        # 点击面板以外取消
+                        pass
+
                 if event.type == pygame.KEYDOWN:
+                    # 如果正在输入，优先处理编辑事件
+                    if self.active_input is not None:
+                        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                            # 确认并应用
+                            self._commit_active_input()
+                        elif event.key == pygame.K_ESCAPE:
+                            # 取消编辑
+                            self.active_input = None
+                        elif event.key == pygame.K_BACKSPACE:
+                            self.input_buffers[self.active_input] = self.input_buffers[self.active_input][:-1]
+                        else:
+                            ch = event.unicode
+                            if ch and (ch.isdigit() or ch in ".-"):
+                                self.input_buffers[self.active_input] += ch
+                        # 不再进行其他键位响应
+                        continue
+
+                    # 非输入模式的键位响应
                     if event.key in (pygame.K_q, pygame.K_ESCAPE):
                         pygame.quit()
                         sys.exit()
@@ -206,6 +258,16 @@ class Scene:
         self.ek_after = None
 
         self._flash = 0
+
+        # 重置输入缓冲
+        self.input_buffers = {
+            "ma": f"{self.block_a.m}",
+            "va": f"{self.block_a.v}",
+            "mb": f"{self.block_b.m}",
+            "vb": f"{self.block_b.v}",
+            "e": f"{self.collision.e}",
+        }
+        self.active_input = None
 
     def _cycle_e(self):
         self._e_idx = (self._e_idx + 1) % len(self.E_PRESETS)
@@ -304,7 +366,7 @@ class Scene:
             screen.blit(vtext, (sx + w // 2 - vtext.get_width() // 2, FLOOR_Y - h - 40))
 
     def _draw_panel(self, screen, fonts):
-        """右侧信息面板"""
+        """右侧信息面板（改为包含输入框）"""
         px = SIM_W
         pygame.draw.rect(screen, PANEL_BG, (px, 0, PANEL_W, H))
         pygame.draw.line(screen, DIVIDER, (px, 0), (px, H), 1)
@@ -313,185 +375,36 @@ class Scene:
         pad = 20
 
         # ── 标题 ──────────────────────────────────────────
-        cy = _panel_heading(screen, fonts, px + pad, cy, "参数", TEXT_HEAD)
+        cy = _panel_heading(screen, fonts, px + pad, cy, "参数（点击以编辑）", TEXT_HEAD)
         cy += 4
 
         e_val = self.collision.e
-        # e_label = self.collision.kind.label
-        # e_col = {1.0: GREEN, 0.0: RED, 0.5: AMBER}.get(e_val, AMBER)
 
-        # 碰撞类型 badge
-        # badge_surf = fonts["body"].render(e_label, True, e_col)
-        # badge_rect = badge_surf.get_rect(topleft=(px + pad, cy))
-        # pygame.draw.rect(
-        #     screen, (*e_col, 28), badge_rect.inflate(16, 8), border_radius=4
-        # )
-        # screen.blit(badge_surf, (px + pad + 8, cy + 4))
-        # cy += badge_surf.get_height() + 16
+        # 恢复系数展示（同时作为输入项）
+        cy += 6
 
-        e_s = fonts["small"].render(f"恢复系数  e = {e_val:.1f}", True, TEXT_SEC)
-        screen.blit(e_s, (px + pad, cy))
-        cy += e_s.get_height() + 18
-
-        # ── 分割线 ─────────────────────────────────────────
-        # pygame.draw.line(screen, DIVIDER, (px + pad, cy), (px + PANEL_W - pad, cy))
-        # cy += 14
-
-        # ── 物块 A ─────────────────────────────────────────
+        # 物块 A 输入
         cy = _panel_heading(screen, fonts, px + pad, cy, "物块 A", COL_A)
         cy += 6
-        cy = _kv_row(
-            screen,
-            fonts,
-            px + pad,
-            cy,
-            PANEL_W - pad * 2,
-            "质量",
-            f"{self.block_a.m} kg",
-        )
-        cy = _kv_row(
-            screen,
-            fonts,
-            px + pad,
-            cy,
-            PANEL_W - pad * 2,
-            "速度",
-            f"{self.block_a.v:.3f} m/s",
-        )
-        cy = _kv_row(
-            screen,
-            fonts,
-            px + pad,
-            cy,
-            PANEL_W - pad * 2,
-            "动量 p",
-            f"{self.block_a.moment:.4f} kg·m/s",
-            val_col=COL_A,
-        )
-        cy = _kv_row(
-            screen,
-            fonts,
-            px + pad,
-            cy,
-            PANEL_W - pad * 2,
-            "动能 Ek",
-            f"{self.block_a.k_energy:.4f} J",
-            val_col=COL_A,
-        )
-        cy += 12
+        cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "质量 (kg)", "ma", val_col=COL_A)
+        cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "速度 (m/s)", "va", val_col=COL_A)
+        cy += 6
 
-        # ── 物块 B ─────────────────────────────────────────
+        # 物块 B 输入
         cy = _panel_heading(screen, fonts, px + pad, cy, "物块 B", COL_B)
         cy += 6
-        cy = _kv_row(
-            screen,
-            fonts,
-            px + pad,
-            cy,
-            PANEL_W - pad * 2,
-            "质量",
-            f"{self.block_b.m} kg",
-        )
-        cy = _kv_row(
-            screen,
-            fonts,
-            px + pad,
-            cy,
-            PANEL_W - pad * 2,
-            "速度",
-            f"{self.block_b.v:.3f} m/s",
-        )
-        cy = _kv_row(
-            screen,
-            fonts,
-            px + pad,
-            cy,
-            PANEL_W - pad * 2,
-            "动量 p",
-            f"{self.block_b.moment:.4f} kg·m/s",
-            val_col=COL_B,
-        )
-        cy = _kv_row(
-            screen,
-            fonts,
-            px + pad,
-            cy,
-            PANEL_W - pad * 2,
-            "动能 Ek",
-            f"{self.block_b.k_energy:.4f} J",
-            val_col=COL_B,
-        )
-        cy += 14
+        cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "质量 (kg)", "mb", val_col=COL_B)
+        cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "速度 (m/s)", "vb", val_col=COL_B)
+        cy += 10
 
-        # ── 分割线 ─────────────────────────────────────────
-        pygame.draw.line(screen, DIVIDER, (px + pad, cy), (px + PANEL_W - pad, cy))
-        cy += 14
+        # 恢复系数输入
+        cy = _panel_heading(screen, fonts, px + pad, cy, "碰撞参数", TEXT_HEAD)
+        cy += 6
+        cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "恢复系数 e", "e")
 
-        # ── 碰撞验证 ───────────────────────────────────────
-        cy = _panel_heading(screen, fonts, px + pad, cy, "动能动量", TEXT_HEAD)
-        cy += 8
-
-        self.collision.block_1 = self.block_a
-        self.collision.block_2 = self.block_b
-
-        if (
-            self.p_before is not None
-            and self.p_after is not None
-            and self.ek_before is not None
-            and self.ek_after is not None
-        ):
-            cy = _kv_row(
-                screen,
-                fonts,
-                px + pad,
-                cy,
-                PANEL_W - pad * 2,
-                "总动量 P",
-                f"{self.p_after:.4f} kg",
-            )
-            cy = _kv_row(
-                screen,
-                fonts,
-                px + pad,
-                cy,
-                PANEL_W - pad * 2,
-                "总动能 EK",
-                f"{self.ek_after:.4f} J",
-            )
-            cy += 10
-        else:
-            # 碰前：显示当前值
-            p_now = self.collision.total_momentum
-            ek_now = self.collision.total_k_energy
-            cy = _kv_row(
-                screen,
-                fonts,
-                px + pad,
-                cy,
-                PANEL_W - pad * 2,
-                "总动量 p",
-                f"{p_now} kg·m/s",
-            )
-            cy = _kv_row(
-                screen,
-                fonts,
-                px + pad,
-                cy,
-                PANEL_W - pad * 2,
-                "总动能 Ek",
-                f"{ek_now} J",
-            )
-        # cy += 12
-
-        # cy = _kv_row(
-        #     screen,
-        #     fonts,
-        #     px + pad,
-        #     cy,
-        #     PANEL_W - pad * 2,
-        #     "碰撞次数",
-        #     str(self.collision_count),
-        # )
+        # 说明提示
+        tip = fonts["small"].render("回车确认，Esc 取消。点击数值区域开始编辑。", True, TEXT_SEC)
+        screen.blit(tip, (px + pad, H - 80))
 
     def _draw_hintbar(self, screen, fonts):
         """底部按键说明栏"""
@@ -532,49 +445,110 @@ class Scene:
             s, (SIM_W // 2 - s.get_width() // 2, FLOOR_Y // 2 - s.get_height() // 2)
         )
 
+    # ── 面板辅助函数（输入框实现） ──��──────────────────────────────
+    def _compute_panel_layout(self, fonts):
+        """基于字体计算输入框的位置 rect（用于点击检测）。"""
+        px = SIM_W
+        pad = 20
+        cy = 24
+        cy += fonts["h2"].get_height() + 2 + 4  # 标题高度
 
-# ── 面板辅助函数 ─────────────────────────────────────────────
+        # 跳过到物块 A 标题
+        cy += fonts["h2"].get_height() + 6
 
+        box_h = fonts["small"].get_height() + 8
+        box_w = 110
+        right_x = px + (PANEL_W - pad) - box_w
 
-def _panel_heading(screen, fonts, x, y, text, color):
-    s = fonts["h2"].render(text, True, color)
-    screen.blit(s, (x, y))
-    return y + s.get_height() + 2
+        # ma
+        self.input_rects["ma"] = pygame.Rect(right_x, cy + 0, box_w, box_h)
+        # va
+        self.input_rects["va"] = pygame.Rect(right_x, cy + box_h + 6, box_w, box_h)
+        # move cy forward past A
+        cy = cy + box_h * 2 + 6 + 6 + fonts["h2"].get_height()
 
+        # B title handled, place mb, vb
+        # mb
+        self.input_rects["mb"] = pygame.Rect(right_x, cy + 0, box_w, box_h)
+        # vb
+        self.input_rects["vb"] = pygame.Rect(right_x, cy + box_h + 6, box_w, box_h)
 
-def _kv_row(screen, fonts, x, y, w, key, val, val_col=None):
-    ks = fonts["small"].render(key, True, TEXT_SEC)
-    vs = fonts["small"].render(val, True, val_col or TEXT_PRI)
-    screen.blit(ks, (x, y))
-    screen.blit(vs, (x + w - vs.get_width(), y))
-    return y + ks.get_height() + 5
+        # e field near lower area
+        self.input_rects["e"] = pygame.Rect(right_x, H - 140, box_w, box_h)
 
+    def _draw_input_row(self, screen, fonts, x, y, w, key, field_name, val_col=None):
+        """绘制一行带输入框的键值对，点击可编辑。"""
+        ks = fonts["small"].render(key, True, TEXT_SEC)
+        screen.blit(ks, (x, y))
 
-# def _verify_row(screen, fonts, x, y, w, label, before, after):
-#     """碰前/碰后对比行"""
-#     ls = fonts["small"].render(label, True, TEXT_SEC)
-#     screen.blit(ls, (x, y))
-#     y += ls.get_height() + 3
+        # 输入框位置（每次按布局计算，以便动态显示）
+        box_w = 110
+        box_h = ks.get_height() + 8
+        box_x = x + w - box_w
+        box_y = y
+        rect = pygame.Rect(box_x, box_y, box_w, box_h)
+        self.input_rects[field_name] = rect
 
-#     if after is None:
-#         vs = fonts["mono"].render(f"{before:.4f}", True, TEXT_PRI)
-#         screen.blit(vs, (x + 8, y))
-#     else:
-#         ok = abs(after - before) < 1e-6
-#         color = GREEN if ok else AMBER
-#         bs = fonts["mono"].render(f"{before:.4f}", True, TEXT_SEC)
-#         # arrow = fonts["mono"].render("",True, color)
-#         as_ = fonts["mono"].render(f"{after:.4f}", True, color)
-#         cx = x + 8
-#         screen.blit(bs, (cx, y))
-#         cx += bs.get_width() + 6
-#         # screen.blit(arrow, (cx, y))
-#         # cx += arrow.get_width() + 6
-#         screen.blit(as_, (cx, y))
-#     return y + fonts["mono"].get_height() + 10
+        # 背景
+        pygame.draw.rect(screen, BOTTON_COL, rect, border_radius=6)
+        pygame.draw.rect(screen, DIVIDER, rect, width=1, border_radius=6)
 
+        # 如果是活动输入框，画高亮边框
+        if self.active_input == field_name:
+            pygame.draw.rect(screen, (40, 120, 220), rect, width=2, border_radius=6)
 
-# ── 仿真区辅助 ───────────────────────────────────────────────
+        # 显示当前缓冲或实时数值
+        display_text = self.input_buffers.get(field_name, self._current_value_str(field_name))
+        txt_surf = fonts["small"].render(display_text, True, val_col or TEXT_PRI)
+        screen.blit(txt_surf, (box_x + 8, box_y + (box_h - txt_surf.get_height()) // 2))
+
+        return y + box_h + 6
+
+    def _current_value_str(self, field_name: str) -> str:
+        if field_name == "ma":
+            return f"{self.block_a.m}"
+        if field_name == "va":
+            return f"{self.block_a.v}"
+        if field_name == "mb":
+            return f"{self.block_b.m}"
+        if field_name == "vb":
+            return f"{self.block_b.v}"
+        if field_name == "e":
+            return f"{self.collision.e}"
+        return ""
+
+    def _commit_active_input(self):
+        """尝试解析并应用 active_input 的值，失败则恢复为旧值。"""
+        if not self.active_input:
+            return
+        buf = self.input_buffers.get(self.active_input, "")
+        try:
+            val = float(buf)
+        except Exception:
+            # 恢复为当前值
+            self.input_buffers[self.active_input] = self._current_value_str(self.active_input)
+            self.active_input = None
+            return
+
+        # 根据字段应用到物理属性
+        if self.active_input == "ma":
+            self.block_a.m = max(0.0001, val)
+        elif self.active_input == "va":
+            self.block_a.v = val
+        elif self.active_input == "mb":
+            self.block_b.m = max(0.0001, val)
+        elif self.active_input == "vb":
+            self.block_b.v = val
+        elif self.active_input == "e":
+            # 限制到 [0,1]
+            val = max(0.0, min(1.0, val))
+            # 重新构建 collision 对象以更新 kind
+            self.collision = D(self.block_a, self.block_b, e=val)
+        # 更新面板缓冲并取消编辑
+        self.input_buffers[self.active_input] = self._current_value_str(self.active_input)
+        self.active_input = None
+
+    # ── 仿真区辅助 ───────────────────────────────────────────────
 
 
 def _draw_velocity_arrow(screen, blk, sx, sy, w, col):
@@ -596,3 +570,20 @@ def _draw_velocity_arrow(screen, blk, sx, sy, w, col):
             (tip - sign * 10, ay + 5),
         ],
     )
+
+
+# ── 面板辅助函数 ─────────────────────────────────────────────
+
+
+def _panel_heading(screen, fonts, x, y, text, color):
+    s = fonts["h2"].render(text, True, color)
+    screen.blit(s, (x, y))
+    return y + s.get_height() + 2
+
+
+def _kv_row(screen, fonts, x, y, w, key, val, val_col=None):
+    ks = fonts["small"].render(key, True, TEXT_SEC)
+    vs = fonts["small"].render(val, True, val_col or TEXT_PRI)
+    screen.blit(ks, (x, y))
+    screen.blit(vs, (x + w - vs.get_width(), y))
+    return y + ks.get_height() + 5
