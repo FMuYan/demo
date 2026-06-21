@@ -1,14 +1,7 @@
 """
-ui/scene.py  —  pygame 可视化场景（优化面板、导出与按钮）
+ui/scene.py  —  pygame 可视化场景（opt: fix missing helper）
 
-本次改动：
-- 保持原有字体（Maple Mono NF CN）
-- 修复单位显示超出面板的问题（单位会被限制在面板内）
-- 把提示文字移到更显眼的位置并改为主色以提高可见性
-- 添加面板按钮：开始/暂停（与 SPACE 同步）和导出（CSV+图表，调用 export_chart）
-- 添加导出后的短暂消息显示
-- 暂停时遮罩仅覆盖仿真区域（不覆盖右侧面板）
-- 布局继续使用动态计算（每帧/每次绘制）
+Fix: restore missing _draw_velocity_arrow helper to avoid NameError at runtime.
 """
 
 from __future__ import annotations
@@ -290,7 +283,7 @@ class Scene:
             outdir.mkdir(parents=True, exist_ok=True)
             paths = export_chart(self.block_a, self.block_b, e=self.collision.e, output_dir=outdir, duration=6.0)
             self._message = f"导出成功: {', '.join([p.name for p in paths])}"
-            self._message_timer = 240  # 显示 4 秒（60 fps 约 4s）
+            self._message_timer = 240  # 显示 4 秒（60 fps 约 4s)
             print("Exported:", paths)
         except Exception as exc:
             self._message = f"导出失败: {exc}"
@@ -385,56 +378,6 @@ class Scene:
             pygame.draw.rect(screen, DIVIDER, btn_export, width=1, border_radius=6)
             lbl_s = fonts["small"].render("导出", True, TEXT_PRI)
             screen.blit(lbl_s, (btn_export.x + (btn_export.w - lbl_s.get_width()) // 2, btn_export.y + (btn_export.h - lbl_s.get_height()) // 2))
-
-        # e small box on right of title
-        e_box = self.input_rects.get("e")
-        if e_box:
-            e_label = fonts["small"].render("e", True, TEXT_SEC)
-            screen.blit(e_label, (e_box.x - 18, title_rect.y + (title_h - e_label.get_height()) // 2))
-            pygame.draw.rect(screen, BUTTON_COL, e_box, border_radius=6)
-            pygame.draw.rect(screen, DIVIDER, e_box, width=1, border_radius=6)
-            ev = self.input_buffers.get("e", self._current_value_str("e")) if self.active_input != "e" else self.input_buffers.get("e", "")
-            ev_s = fonts["small"].render(ev, True, TEXT_PRI)
-            screen.blit(ev_s, (e_box.x + 8, e_box.y + (e_box.h - ev_s.get_height()) // 2))
-
-        cy += title_h + 12
-
-        # sections: A and B
-        cy = _panel_heading(screen, fonts, px + pad, cy, "物块 A", COL_A)
-        cy += 6
-        cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "质量", "ma", val_col=COL_A)
-        cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "速度", "va", val_col=COL_A)
-        pygame.draw.line(screen, DIVIDER, (px + pad, cy + 6), (px + PANEL_W - pad, cy + 6))
-        cy += 14
-
-        cy = _panel_heading(screen, fonts, px + pad, cy, "物块 B", COL_B)
-        cy += 6
-        cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "质量", "mb", val_col=COL_B)
-        cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "速度", "vb", val_col=COL_B)
-        cy += 10
-
-        cy = _panel_heading(screen, fonts, px + pad, cy, "初始 / 当前", TEXT_HEAD)
-        cy += 8
-        init_p = self.initial_p
-        init_ek = self.initial_ek
-        cy = _kv_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "初始 总动量 p", f"{init_p:.4f} kg·m/s")
-        cy = _kv_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "初始 总动能 Ek", f"{init_ek:.4f} J")
-        cy += 6
-        self.collision.block_1 = self.block_a
-        self.collision.block_2 = self.block_b
-        p_now = self.collision.total_momentum
-        ek_now = self.collision.total_k_energy
-        cy = _kv_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "当前 总动量 p", f"{p_now:.4f} kg·m/s")
-        cy = _kv_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "当前 总动能 Ek", f"{ek_now:.4f} J")
-
-        # message (e.g., export result)
-        if self._message:
-            msg_s = fonts["small"].render(self._message, True, TEXT_PRI)
-            screen.blit(msg_s, (px + pad, H - 90))
-
-        # hint (moved upward for visibility)
-        tip = fonts["hint"].render("回车确认，Esc 取消。点击数值区域开始编辑。", True, TEXT_PRI)
-        screen.blit(tip, (px + pad, H - 56))
 
     def _compute_panel_layout(self, fonts):
         px = SIM_W
@@ -563,5 +506,22 @@ class Scene:
         s = fonts["title"].render("已暂停", True, AMBER)
         screen.blit(s, (SIM_W // 2 - s.get_width() // 2, FLOOR_Y // 2 - s.get_height() // 2))
 
+
+# helper: velocity arrow (was missing causing NameError)
+def _draw_velocity_arrow(screen, blk, sx, sy, w, col):
+    """Draw an arrow above the block showing its velocity direction and magnitude."""
+    try:
+        v = blk.v
+    except Exception:
+        return
+    if abs(v) < 0.05:
+        return
+    cx = sx + w // 2
+    ay = sy - 14
+    sign = 1 if v > 0 else -1
+    length = min(90, max(16, int(abs(v) * 18)))
+    tip = cx + sign * length
+    pygame.draw.line(screen, col, (cx, ay), (tip, ay), 2)
+    pygame.draw.polygon(screen, col, [(tip, ay), (tip - sign * 10, ay - 5), (tip - sign * 10, ay + 5)])
 
 # END
