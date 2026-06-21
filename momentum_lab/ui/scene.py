@@ -2,8 +2,11 @@
 ui/scene.py  —  pygame 可视化场景（带交互输入面板）
 布局：左侧仿真轨道区 | 右侧信息面板（固定 320px）
 
-改动说明：右侧参数面板由只读展示改为可编辑输入框，支持鼠标点击选中、键盘输入数值、回车确认、Esc 取消。
-支持可编辑参数：物块 A 质量 (ma)、速度 (va)、物块 B 质量 (mb)、速度 (vb)、恢复系数 (e)
+改动说明：
+- 点击输入时自动暂停，编辑完成或取消后恢复之前的暂停状态。
+- 切换恢复系数 e 时保留当前物块质量/速度（不再重置），除非按 R 重置。
+- 输入框显示单位（非编辑时），编辑时显示纯数字缓冲。
+- 恢复右侧面板中的动量/动能显示，支持碰撞前后对比。
 """
 
 from __future__ import annotations
@@ -89,10 +92,11 @@ class Scene:
     键位：
         SPACE   暂停 / 继续
         R       重置
-        E       切换碰撞类型
+        E       切换碰撞类型（保留当前质量/速度）
         Q/ESC   退出
 
     交互输入：在右侧面板点击参数项进入编辑，输入数字后按回车确认，Esc 取消。
+    点击输入时会自动暂停，编辑结束后恢复到编辑前的暂停状态。
     """
 
     E_PRESETS = [1.0, 0.5, 0.0]
@@ -132,6 +136,9 @@ class Scene:
         # 在运行时由 _compute_panel_layout 填充（字段 -> pygame.Rect）
         self.input_rects: dict[str, pygame.Rect] = {}
 
+        # 编辑时的暂停状态保存
+        self._paused_before_edit = False
+
     # ── 主循环 ───────────────────────────────────────────────
     def run(self):
         pygame.init()
@@ -153,16 +160,21 @@ class Scene:
                     sys.exit()
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     mx, my = event.pos
-                    # 点击面板输入框，选中
+                    # 点击面板输入框，选中并自动暂停
                     for field, rect in self.input_rects.items():
                         if rect.collidepoint(mx, my):
                             self.active_input = field
                             # buffer 初始化为当前字符串表示
                             self.input_buffers[field] = self._current_value_str(field)
+                            # 记住之前的暂停状态并暂停仿真
+                            self._paused_before_edit = self.paused
+                            self.paused = True
                             break
                     else:
-                        # 点击面板以外取消
-                        pass
+                        # 如果当前处于编辑状态但点击面板外，取消编辑并恢复暂停状态
+                        if self.active_input is not None:
+                            self.active_input = None
+                            self.paused = self._paused_before_edit
 
                 if event.type == pygame.KEYDOWN:
                     # 如果正在输入，优先处理编辑事件
@@ -171,8 +183,9 @@ class Scene:
                             # 确认并应用
                             self._commit_active_input()
                         elif event.key == pygame.K_ESCAPE:
-                            # 取消编辑
+                            # 取消编辑，恢复暂停状态
                             self.active_input = None
+                            self.paused = self._paused_before_edit
                         elif event.key == pygame.K_BACKSPACE:
                             self.input_buffers[self.active_input] = self.input_buffers[self.active_input][:-1]
                         else:
@@ -268,11 +281,14 @@ class Scene:
             "e": f"{self.collision.e}",
         }
         self.active_input = None
+        self._paused_before_edit = False
 
     def _cycle_e(self):
+        # 切换恢复系数，但保留当前质量/速度/位置状态（不重置）
         self._e_idx = (self._e_idx + 1) % len(self.E_PRESETS)
-        self.collision = D(self.block_a, self.block_b, e=self.E_PRESETS[self._e_idx])
-        self._reset()
+        new_e = self.E_PRESETS[self._e_idx]
+        # 重新构建 collision 以更新 kind，但使用当前 block 对象
+        self.collision = D(self.block_a, self.block_b, e=new_e)
 
     # ── 渲染 ─────────────────────────────────────────────────
     def _draw(self, screen: pygame.Surface, fonts: dict):
@@ -366,7 +382,7 @@ class Scene:
             screen.blit(vtext, (sx + w // 2 - vtext.get_width() // 2, FLOOR_Y - h - 40))
 
     def _draw_panel(self, screen, fonts):
-        """右侧信息面板（改为包含输入框）"""
+        """右侧信息面板（包含输入框与动量/动能展示）"""
         px = SIM_W
         pygame.draw.rect(screen, PANEL_BG, (px, 0, PANEL_W, H))
         pygame.draw.line(screen, DIVIDER, (px, 0), (px, H), 1)
@@ -377,11 +393,6 @@ class Scene:
         # ── 标题 ──────────────────────────────────────────
         cy = _panel_heading(screen, fonts, px + pad, cy, "参数（点击以编辑）", TEXT_HEAD)
         cy += 4
-
-        e_val = self.collision.e
-
-        # 恢复系数展示（同时作为输入项）
-        cy += 6
 
         # 物块 A 输入
         cy = _panel_heading(screen, fonts, px + pad, cy, "物块 A", COL_A)
@@ -401,6 +412,69 @@ class Scene:
         cy = _panel_heading(screen, fonts, px + pad, cy, "碰撞参数", TEXT_HEAD)
         cy += 6
         cy = self._draw_input_row(screen, fonts, px + pad, cy, PANEL_W - pad * 2, "恢复系数 e", "e")
+
+        cy += 12
+        # ── 碰撞验证（动量 / 动能）──────────────────────────────────────
+        cy = _panel_heading(screen, fonts, px + pad, cy, "动能 / 动量", TEXT_HEAD)
+        cy += 8
+
+        self.collision.block_1 = self.block_a
+        self.collision.block_2 = self.block_b
+
+        if (
+            self.p_before is not None
+            and self.p_after is not None
+            and self.ek_before is not None
+            and self.ek_after is not None
+        ):
+            cy = _kv_row(
+                screen,
+                fonts,
+                px + pad,
+                cy,
+                PANEL_W - pad * 2,
+                "碰撞后 总动量 p",
+                f"{self.p_after:.4f} kg·m/s",
+            )
+            cy = _kv_row(
+                screen,
+                fonts,
+                px + pad,
+                cy,
+                PANEL_W - pad * 2,
+                "碰撞后 总动能 Ek",
+                f"{self.ek_after:.4f} J",
+            )
+            cy += 6
+            # 显示碰撞前后的比较（简单标色）
+            ok = abs(self.p_after - self.p_before) < 1e-6 if (self.p_before is not None and self.p_after is not None) else False
+            col = GREEN if ok else AMBER
+            status = "动量守恒（近似）" if ok else "动量变化（超出容差）"
+            s = fonts["small"].render(status, True, col)
+            screen.blit(s, (px + pad, cy))
+            cy += s.get_height() + 2
+        else:
+            # 显示当前值
+            p_now = self.collision.total_momentum
+            ek_now = self.collision.total_k_energy
+            cy = _kv_row(
+                screen,
+                fonts,
+                px + pad,
+                cy,
+                PANEL_W - pad * 2,
+                "当前 总动量 p",
+                f"{p_now:.4f} kg·m/s",
+            )
+            cy = _kv_row(
+                screen,
+                fonts,
+                px + pad,
+                cy,
+                PANEL_W - pad * 2,
+                "当前 总动能 Ek",
+                f"{ek_now:.4f} J",
+            )
 
         # 说明提示
         tip = fonts["small"].render("回车确认，Esc 取消。点击数值区域开始编辑。", True, TEXT_SEC)
@@ -445,7 +519,7 @@ class Scene:
             s, (SIM_W // 2 - s.get_width() // 2, FLOOR_Y // 2 - s.get_height() // 2)
         )
 
-    # ── 面板辅助函数（输入框实现） ──��──────────────────────────────
+    # ── 面板辅助函数（输入框实现） ────────────────────────────────
     def _compute_panel_layout(self, fonts):
         """基于字体计算输入框的位置 rect（用于点击检测）。"""
         px = SIM_W
@@ -476,6 +550,9 @@ class Scene:
         # e field near lower area
         self.input_rects["e"] = pygame.Rect(right_x, H - 140, box_w, box_h)
 
+    def _unit_for_field(self, field_name: str) -> str:
+        return {"ma": " kg", "va": " m/s", "mb": " kg", "vb": " m/s", "e": ""}.get(field_name, "")
+
     def _draw_input_row(self, screen, fonts, x, y, w, key, field_name, val_col=None):
         """绘制一行带输入框的键值对，点击可编辑。"""
         ks = fonts["small"].render(key, True, TEXT_SEC)
@@ -497,8 +574,14 @@ class Scene:
         if self.active_input == field_name:
             pygame.draw.rect(screen, (40, 120, 220), rect, width=2, border_radius=6)
 
-        # 显示当前缓冲或实时数值
-        display_text = self.input_buffers.get(field_name, self._current_value_str(field_name))
+        # 显示当前缓冲或实时数值；非编辑状态在数值后显示单位
+        if self.active_input == field_name:
+            display_text = self.input_buffers.get(field_name, self._current_value_str(field_name))
+        else:
+            raw = self.input_buffers.get(field_name, self._current_value_str(field_name))
+            # 有时 buffer 中会包含 the numeric string; ensure we show current actual value if different
+            display_text = raw + self._unit_for_field(field_name)
+
         txt_surf = fonts["small"].render(display_text, True, val_col or TEXT_PRI)
         screen.blit(txt_surf, (box_x + 8, box_y + (box_h - txt_surf.get_height()) // 2))
 
@@ -518,7 +601,7 @@ class Scene:
         return ""
 
     def _commit_active_input(self):
-        """尝试解析并应用 active_input 的值，失败则恢复为旧值。"""
+        """尝试解析并应用 active_input 的值，失败则恢复为旧值。编辑结束后恢复暂停状态。"""
         if not self.active_input:
             return
         buf = self.input_buffers.get(self.active_input, "")
@@ -528,6 +611,8 @@ class Scene:
             # 恢复为当前值
             self.input_buffers[self.active_input] = self._current_value_str(self.active_input)
             self.active_input = None
+            # 恢复暂停状态
+            self.paused = self._paused_before_edit
             return
 
         # 根据字段应用到物理属性
@@ -542,11 +627,14 @@ class Scene:
         elif self.active_input == "e":
             # 限制到 [0,1]
             val = max(0.0, min(1.0, val))
-            # 重新构建 collision 对象以更新 kind
+            # 重新构建 collision 对象以更新 kind（保留当前 block 状态）
             self.collision = D(self.block_a, self.block_b, e=val)
+
         # 更新面板缓冲并取消编辑
         self.input_buffers[self.active_input] = self._current_value_str(self.active_input)
         self.active_input = None
+        # 恢复暂停状态
+        self.paused = self._paused_before_edit
 
     # ── 仿真区辅助 ───────────────────────────────────────────────
 
