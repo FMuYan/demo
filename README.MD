@@ -6,13 +6,13 @@
 ## 项目依赖、结构
 > 采用 `pygame` 作为主要可视化演示途径。
 >
-> 使用 `numpy` `scipy` 处理原始实验模拟数据。
+> 使用 `numpy` 处理原始实验模拟数据。
 >
 > 通过 `matplotlib` `pandas` 导出实验图表
 ```
 /src
 ├── ui      # 可视化交互部分 pygame
-├── model   # 物理部分       numpy scipy
+├── model   # 物理部分       numpy 
 └── export  # 数据导出       matplotlib pandas
 ```
 
